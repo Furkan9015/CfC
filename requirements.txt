@@ -1,0 +1,10 @@
+matplotlib==3.7.2
+numpy==1.25.2
+pandas==2.0.3
+pytorch_lightning==2.0.8
+scikit_learn==1.2.2
+tensorflow==2.13.0
+torch==2.0.1
+torchmetrics==1.1.1
+torchvision==0.15.2
+tqdm==4.66.1

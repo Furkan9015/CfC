@@ -30,7 +30,7 @@ def get_physio(args, device):
         train=True,
         quantization=0.016,
         download=True,
-        n_samples=min(10000, 8000),
+        n_samples=min(10000, 219),
         device=device,
     )
 
@@ -48,8 +48,9 @@ def get_physio(args, device):
 
     n_samples = len(total_dataset)
     input_dim = vals.size(-1)
-
+    #print(input_dim)
     batch_size = min(min(len(train_dataset_obj), args.batch_size), 8000)
+    #print(batch_size)
     data_min, data_max = get_data_min_max(total_dataset, device)
     # print("data_min,", data_min)
     # print("data_max, ", data_max)
@@ -133,52 +134,29 @@ class PhysioNet(object):
     outcome_urls = ["https://physionet.org/files/challenge-2012/1.0.0/Outcomes-a.txt"]
 
     params = [
-        "Age",
-        "Gender",
-        "Height",
-        "ICUType",
-        "Weight",
-        "Albumin",
-        "ALP",
-        "ALT",
-        "AST",
-        "Bilirubin",
-        "BUN",
-        "Cholesterol",
-        "Creatinine",
-        "DiasABP",
-        "FiO2",
-        "GCS",
-        "Glucose",
-        "HCO3",
-        "HCT",
-        "HR",
-        "K",
-        "Lactate",
-        "Mg",
-        "MAP",
-        "MechVent",
-        "Na",
-        "NIDiasABP",
-        "NIMAP",
-        "NISysABP",
-        "PaCO2",
-        "PaO2",
-        "pH",
-        "Platelets",
-        "RespRate",
-        "SaO2",
-        "SysABP",
-        "Temp",
-        "TroponinI",
-        "TroponinT",
-        "Urine",
-        "WBC",
+        "ASV_1",
+        "ASV_2",
+        "ASV_3",
+        "ASV_4",
+        "ASV_5",
+        "ASV_6",
+        "ASV_7",
+        "ASV_8",
+        "ASV_9",
+        "ASV_10",
+        "ASV_11",
+        "ASV_12",
+        "ASV_13",
+        "ASV_14",
+        "ASV_15",
+        "ASV_16",
+        "ASV_17",
+        #"DR"
     ]
 
     params_dict = {k: i for i, k in enumerate(params)}
 
-    labels = ["SAPS-I", "SOFA", "Length_of_stay", "Survival", "In-hospital_death"]
+    labels = ["Test","In-hospital_death"]
     labels_dict = {k: i for i, k in enumerate(labels)}
 
     def __init__(
@@ -238,8 +216,7 @@ class PhysioNet(object):
         # Download outcome data
         for url in self.outcome_urls:
             filename = url.rpartition("/")[2]
-            download_url(url, self.raw_folder, filename, None)
-
+            #download_url(url, self.raw_folder, filename, None)
             txtfile = os.path.join(self.raw_folder, filename)
             with open(txtfile) as f:
                 lines = f.readlines()
@@ -256,10 +233,10 @@ class PhysioNet(object):
 
         for url in self.urls:
             filename = url.rpartition("/")[2]
-            download_url(url, self.raw_folder, filename, None)
-            tar = tarfile.open(os.path.join(self.raw_folder, filename), "r:gz")
-            tar.extractall(self.raw_folder)
-            tar.close()
+            #download_url(url, self.raw_folder, filename, None)
+            # tar = tarfile.open(os.path.join(self.raw_folder, filename), "r:gz")
+            # tar.extractall(self.raw_folder)
+            # tar.close()
 
             print("Processing {}...".format(filename))
 
@@ -279,13 +256,12 @@ class PhysioNet(object):
                         total += 1
                         time, param, val = l.split(",")
                         # Time in hours
-                        time = (
-                            float(time.split(":")[0]) + float(time.split(":")[1]) / 60.0
-                        )
+                        # time = (
+                        #     float(time.split(":")[0]) + float(time.split(":")[1]) / 60.0
+                        # )
                         # round up the time stamps (up to 6 min by default)
                         # used for speed -- we actually don't need to quantize it in Latent ODE
-                        time = round(time / self.quantization) * self.quantization
-
+                        time = round(int(time) / self.quantization) * self.quantization
                         if time != prev_time:
                             tt.append(time)
                             vals.append(torch.zeros(len(self.params)).to(device))
@@ -313,13 +289,13 @@ class PhysioNet(object):
                 tt = torch.tensor(tt).to(device)
                 vals = torch.stack(vals)
                 mask = torch.stack(mask)
-
+                
                 labels = None
                 if record_id in outcomes:
                     # Only training set has labels
                     labels = outcomes[record_id]
                     # Out of 5 label types provided for Physionet, take only the last one -- mortality
-                    labels = labels[4]
+                    labels = labels[1]
 
                 patients.append((record_id, tt, vals, mask, labels))
 

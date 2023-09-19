@@ -1,10 +1,17 @@
+# This file is used to train the CfC model on the Physionet dataset.
+# The code is adapted from the CfC codebase, which can be found here:
+# https://github.com/raminmh/CfC/blob/master/train_physio.py
+# The original CfC paper can be found here:
+# https://arxiv.org/abs/2006.16972
 import argparse
 import os
 
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
-from pytorch_lightning.metrics.functional import accuracy, auroc
+import torch.multiprocessing as mp
+from torchmetrics import F1Score
+from torchmetrics.functional import accuracy, auroc, average_precision
 from torch_cfc import Cfc
 from pytorch_lightning.callbacks import ModelCheckpoint
 import torch.nn.functional
@@ -14,6 +21,9 @@ from pytorch_lightning.loggers import CSVLogger
 from duv_physionet import get_physio
 import numpy as np
 import time
+from sklearn.metrics import precision_recall_curve, auc
+from sklearn.metrics import roc_curve
+import matplotlib.pyplot as plt
 
 from pytorch_lightning.callbacks import Callback
 
@@ -30,12 +40,14 @@ class SpeedCallback(Callback):
 class PhysionetLearner(pl.LightningModule):
     def __init__(self, model, hparams):
         super().__init__()
+        self.test_step_outputs = [[], []]  # two dataloaders
         self.model = model
         self.loss_fn = nn.CrossEntropyLoss(
             weight=torch.Tensor((1.0, hparams["class_weight"]))
         )
         self._hparams = hparams
         self._all_rocs = []
+        self._all_prs = []
 
     def _prepare_batch(self, batch):
         x, tt, mask, y = batch
@@ -52,12 +64,12 @@ class PhysionetLearner(pl.LightningModule):
         y = y.view(-1)
         loss = self.loss_fn(y_hat, y)
         preds = torch.argmax(y_hat.detach(), dim=-1)
-        acc = accuracy(preds, y)
+        acc = accuracy(preds, y, task="binary")
         self.log("train_acc", acc, prog_bar=True)
         self.log("train_loss", loss, prog_bar=True)
         return loss
 
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
         x, tt, mask, y = self._prepare_batch(batch)
 
         y_hat = self.model.forward(x, tt, mask)
@@ -67,26 +79,36 @@ class PhysionetLearner(pl.LightningModule):
         loss = self.loss_fn(y_hat, y)
 
         preds = torch.argmax(y_hat, dim=1)
-        acc = accuracy(preds, y)
+        #self.test_step_outputs[dataloader_idx].append([preds, y])
+        acc = accuracy(preds, y, task="binary")
         softmax = torch.nn.functional.softmax(y_hat, dim=1)[:, 1]
+        self.test_step_outputs[dataloader_idx].append([softmax, y])
         self.log("val_loss", loss, prog_bar=True)
         self.log("val_acc", acc, prog_bar=True)
+        f1 = F1Score(task="binary", num_classes=2)
+        f1_score = f1(preds.cpu(),y.cpu())
+        self.log("val_f1", f1_score, prog_bar=True)
         return [softmax, y]
 
-    def validation_epoch_end(self, validation_step_outputs):
-        all_preds = torch.cat([l[0] for l in validation_step_outputs])
-        all_labels = torch.cat([l[1] for l in validation_step_outputs])
-
-        auc = auroc(all_preds, all_labels, pos_label=1)
+    def on_validation_epoch_end(self):
+        all_preds = torch.cat([l[0] for l in self.test_step_outputs[0]])
+        all_labels = torch.cat([l[1] for l in self.test_step_outputs[0]])
+        auprc = average_precision(all_preds.float(), all_labels, task="binary")
+        self._all_prs.append(auprc)
+        self.log("val_aucpr", auprc, prog_bar=True)
+        auc = auroc(all_preds.float(), all_labels, task="binary")
+        # f1 = BinaryF1Score(all_preds.float(), all_labels)
+        # self.log("val_f1", f1, prog_bar=True)
         self._all_rocs.append(auc)
         self.log("val_rocauc", auc, prog_bar=True)
+
 
     def test_step(self, batch, batch_idx):
         # Here we just reuse the validation_step for testing
         return self.validation_step(batch, batch_idx)
 
-    def test_epoch_end(self, test_step_outputs):
-        return self.validation_epoch_end(test_step_outputs)
+    def on_test_epoch_end(self):
+        return self.on_validation_epoch_end()
 
     def configure_optimizers(self):
         optim = "rmsprop"
@@ -120,13 +142,9 @@ class PhysionetLearner(pl.LightningModule):
         current_epoch,
         batch_nb,
         optimizer,
-        optimizer_idx,
-        closure,
-        on_tpu=False,
-        using_native_amp=False,
-        using_lbfgs=False,
+        closure
     ):
-        optimizer.optimizer.step(closure=closure)
+        optimizer.step(closure=closure)
         # Apply weight constraints
         if self._hparams["use_ltc"]:
             self.model.rnn_cell.apply_weight_constraints()
@@ -135,7 +153,7 @@ class PhysionetLearner(pl.LightningModule):
 def eval(hparams, speed=False):
     # torch.set_num_threads(4)
     model = Cfc(
-        in_features=41 * 2,
+        in_features= 51, #54 with DR
         hidden_size=hparams["hidden_size"],
         out_feature=2,
         hparams=hparams,
@@ -147,7 +165,7 @@ def eval(hparams, speed=False):
     class FakeArg:
         batch_size = 32
         classif = True
-        n = 8000
+        n = 428
         extrap = False
         sample_tp = None
         cut_tp = None
@@ -158,7 +176,6 @@ def eval(hparams, speed=False):
     data_obj = get_physio(fake_arg, device)
     train_loader = data_obj["train_dataloader"]
     test_loader = data_obj["test_dataloader"]
-
     gpu_name = "cpu"
     if "CUDA_VISIBLE_DEVICES" in os.environ.keys():
         gpu_name = str(os.environ["CUDA_VISIBLE_DEVICES"])
@@ -166,7 +183,7 @@ def eval(hparams, speed=False):
     trainer = pl.Trainer(
         max_epochs=hparams["epochs"],
         gradient_clip_val=hparams["clipnorm"],
-        gpus=1,
+        devices = 1, accelerator = "gpu",
         callbacks=[SpeedCallback()] if speed else None,
     )
     trainer.fit(
@@ -174,36 +191,47 @@ def eval(hparams, speed=False):
         train_loader,
     )
     results = trainer.test(learner, test_loader)[0]
-    return float(results["val_rocauc"])
+    all_preds = torch.cat([l[0] for l in learner.test_step_outputs[0]])
+    all_labels = torch.cat([l[1] for l in learner.test_step_outputs[0]])
+    
+    fpr, tpr, thresholds = roc_curve(all_labels.cpu(), all_preds.cpu())
+    precision, recall, _ = precision_recall_curve(all_labels.cpu(), all_preds.cpu())
+    
+    return float(results["val_rocauc"]), float(results["val_aucpr"]), fpr, tpr, thresholds, precision, recall
 
 
 
 # AUC: 83.90 % +-0.22
+
+# # AUC: 88.37 % +-0.87
 BEST_DEFAULT = {
-    "epochs": 57,
-    "class_weight": 11.69,
+    "epochs": 34, # also try out different epochs or just use an Early Stopping mechanism (latter is better)
+    "class_weight": 0.25,
     "clipnorm": 0,
-    "hidden_size": 256,
+    "hidden_size": 512,
     "base_lr": 0.002,
     "decay_lr": 0.9,
-    "backbone_activation": "silu",
+    "backbone_activation": "lecun",
     "backbone_units": 64,
     "backbone_dr": 0.2,
-    "backbone_layers": 2,
+    "backbone_layers": 1,
     "weight_decay": 4e-06,
     "optim": "adamw",
-    "init": 0.5,
-    "batch_size": 128,
-    "use_mixed": False,
+    "init": 0.5, #try 53 55 and 0.6  
+    "batch_size": 16, #maybe try 32? idk. try out different batch sizes, its a hyperparameter
+    "use_mixed": False, #this is an intriguing case, seems to decrease model perf variance but not sure at all
     "no_gate": False,
     "minimal": False,
     "use_ltc": False,
 }
 
+
+
+# Ignore the rest for now for the lifespan prediction problem
 # 0.8397588133811951
 BEST_MIXED = {
-    "epochs": 65,
-    "class_weight": 5.91,
+    "epochs": 20,
+    "class_weight": 0.71,
     "clipnorm": 0,
     "hidden_size": 64,
     "base_lr": 0.001,
@@ -215,7 +243,7 @@ BEST_MIXED = {
     "weight_decay": 4e-06,
     "optim": "adamw",
     "init": 0.6,
-    "batch_size": 128,
+    "batch_size": 32,
     "use_mixed": True,
     "no_gate": False,
     "minimal": False,
@@ -224,8 +252,8 @@ BEST_MIXED = {
 
 # 0.8395 $\pm$ 0.0033
 BEST_NO_GATE = {
-    "epochs": 58,
-    "class_weight": 7.73,
+    "epochs": 30,
+    "class_weight": 0.32,
     "clipnorm": 0,
     "hidden_size": 64,
     "base_lr": 0.003,
@@ -237,7 +265,7 @@ BEST_NO_GATE = {
     "weight_decay": 5e-05,
     "optim": "adamw",
     "init": 0.55,
-    "batch_size": 128,
+    "batch_size": 8,
     "use_mixed": False,
     "no_gate": True,
     "minimal": False,
@@ -292,11 +320,20 @@ BEST_LTC = {
 def score(config, n=5):
 
     means = []
+    means2 = []
+    fpr_list = []
+    tpr_list = []
+
+
     for i in range(n):
-        means.append(eval(config, speed=True))
-    print(f"Test AUC: {np.mean(means):0.4f} $\\pm$ {np.std(means):0.4f} ")
-
-
+        a, b, fpr, tpr, _, precision,recall = eval(config, speed=True)
+        means.append(a)
+        means2.append(b)
+        fpr_list.append(fpr)
+        tpr_list.append(tpr)
+    print(f"Test ROCAUC: {np.mean(means):0.4f} $\\pm$ {np.std(means):0.4f} ")
+    print(f"Test AUCPR: {np.mean(means2):0.4f} $\\pm$ {np.std(means2):0.4f} ")
+    return fpr_list, tpr_list, precision, recall
 
 
 if __name__ == "__main__":
@@ -307,13 +344,44 @@ if __name__ == "__main__":
     parser.add_argument("--use_ltc", action="store_true")
     args = parser.parse_args()
 
+
     if args.minimal:
-        score(BEST_MINIMAL)
+        fpr_list, tpr_list, precision, recall = score(BEST_MINIMAL)
     elif args.no_gate:
-        score(BEST_NO_GATE)
+        fpr_list, tpr_list, precision, recall = score(BEST_NO_GATE)
     elif args.use_ltc:
-        score(LTC_TEST)
+        fpr_list, tpr_list, precision, recall = score(BEST_LTC)
     elif args.use_mixed:
-        score(BEST_MIXED)
+        fpr_list, tpr_list, precision, recall = score(BEST_MIXED)
     else:
-        score(BEST_DEFAULT)
+        fpr_list, tpr_list, precision, recall = score(BEST_DEFAULT)
+
+    ## Set the parameter 'n' of score function to 1 in case of plotting 
+    # Plot ROC curve
+    # plt.figure()
+    # for i in range(len(fpr_list)):
+    #     plt.plot(fpr_list[i], tpr_list[i], label=f'ROC Curve {i+1}')
+    # plt.plot([0, 1], [0, 1], 'k--', label='Random Guessing')
+    # plt.xlabel('False Positive Rate')
+    # plt.ylabel('True Positive Rate')
+    # plt.title('Receiver Operating Characteristic (ROC) Curve')
+    # plt.legend()
+    # plt.savefig('roc_curve.png')
+
+    # # Close the figure to release resources (optional)
+    # plt.close()
+    # pr_auc = auc(recall, precision)
+
+    # # Plot Precision-Recall curve
+    # plt.figure()
+    # plt.plot(recall, precision, color='darkorange', lw=2, label=f'PR Curve (AUC = {pr_auc:.2f})')
+    # plt.xlabel('Recall')
+    # plt.ylabel('Precision')
+    # plt.title('Precision-Recall Curve')
+    # plt.legend()
+
+    # # Save the Precision-Recall curve as an image file (e.g., PNG)
+    # plt.savefig('precision_recall_curve.png')
+
+    # # Close the figure to release resources (optional)
+    # plt.close()
