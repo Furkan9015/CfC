@@ -12,7 +12,7 @@ else:
     matplotlib.use("Agg")
 import matplotlib.pyplot
 import matplotlib.pyplot as plt
-
+from sklearn.model_selection import LeaveOneOut
 import duv_utils as utils
 import numpy as np
 import tarfile
@@ -20,11 +20,12 @@ import torch
 from torch.utils.data import DataLoader
 from torchvision.datasets.utils import download_url
 from sklearn.model_selection import train_test_split
+from sklearn.utils import class_weight
 
 # Adapted from: https://github.com/rtqichen/time-series-datasets
 
-
-def get_physio(args, device):
+def loocv_get_physio(args, device):
+    # Load your dataset here
     train_dataset_obj = PhysioNet(
         "data/physionet",
         train=True,
@@ -33,13 +34,67 @@ def get_physio(args, device):
         n_samples=min(10000, 219),
         device=device,
     )
+    total_dataset = train_dataset_obj[: len(train_dataset_obj)]
+    all_labels = [int(ex[-1]) for ex in total_dataset]  
+    print("\nClass weights: ", class_weight.compute_class_weight(class_weight='balanced',classes=np.unique(all_labels),y=all_labels))
+    loo = LeaveOneOut()
 
+    train_dataloaders = []
+    test_dataloaders = []
+
+    for train_indices, test_indices in loo.split(train_dataset_obj):
+        train_data = [train_dataset_obj[i] for i in train_indices]
+        test_data = [train_dataset_obj[i] for i in test_indices]
+
+        record_id, tt, vals, mask, labels = train_data[0]
+
+        n_samples = len(train_data)
+        input_dim = vals.size(-1)
+        batch_size = min(min(len(train_dataset_obj), args.batch_size), 8000)
+
+        data_min, data_max = get_data_min_max(train_data, device)
+
+        train_dataloader = DataLoader(
+            train_data,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=4,
+            collate_fn=lambda batch: variable_time_collate_fn2(
+                batch, args, device, data_type="train", data_min=data_min, data_max=data_max
+            ),
+        )
+        test_dataloader = DataLoader(
+            test_data,
+            batch_size=n_samples,
+            shuffle=False,
+            num_workers=4,
+            collate_fn=lambda batch: variable_time_collate_fn2(
+                batch, args, device, data_type="test", data_min=data_min, data_max=data_max
+            ),
+        )
+
+        train_dataloaders.append(train_dataloader)
+        test_dataloaders.append(test_dataloader)
+
+    return train_dataloaders, test_dataloaders
+
+def get_physio(args, device):
+    train_dataset_obj = PhysioNet(
+        "/home/lakatos/feris/CfC/data/physionet", #full path needed for ray tune
+        train=True,
+        quantization=0.016,
+        download=True,
+        n_samples=min(10000, 219),
+        device=device,
+    )
     # Combine and shuffle samples from physionet Train and physionet Test
     total_dataset = train_dataset_obj[: len(train_dataset_obj)]
     # print("total_dataset len: ", len(total_dataset))
     # Shuffle and split
+    #print(total_dataset)
+    all_labels = [ex[-1] for ex in total_dataset]  
     train_data, test_data = train_test_split(
-        total_dataset, train_size=0.8, random_state=42, shuffle=True
+        total_dataset, train_size=0.8, random_state=42,stratify=all_labels, shuffle=True
     )
     # print("train_data len: ", len(train_data))
     # print("test_data len: ", len(test_data))
