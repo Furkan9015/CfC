@@ -4,30 +4,32 @@
 ###########################
 
 import os
+
 import matplotlib
 
 if os.path.exists("/Users/yulia"):
     matplotlib.use("TkAgg")
 else:
     matplotlib.use("Agg")
+import tarfile
+
+import CfC.duv_utils as utils
 import matplotlib.pyplot
 import matplotlib.pyplot as plt
-from sklearn.model_selection import LeaveOneOut
-import duv_utils as utils
 import numpy as np
-import tarfile
 import torch
+from sklearn.model_selection import LeaveOneOut, train_test_split
+from sklearn.utils import class_weight
 from torch.utils.data import DataLoader
 from torchvision.datasets.utils import download_url
-from sklearn.model_selection import train_test_split
-from sklearn.utils import class_weight
 
 # Adapted from: https://github.com/rtqichen/time-series-datasets
+
 
 def loocv_get_physio(args, device):
     # Load your dataset here
     train_dataset_obj = PhysioNet(
-        "data/physionet",
+        "CfC/data/physionet",
         train=True,
         quantization=0.016,
         download=True,
@@ -35,8 +37,13 @@ def loocv_get_physio(args, device):
         device=device,
     )
     total_dataset = train_dataset_obj[: len(train_dataset_obj)]
-    all_labels = [int(ex[-1]) for ex in total_dataset]  
-    print("\nClass weights: ", class_weight.compute_class_weight(class_weight='balanced',classes=np.unique(all_labels),y=all_labels))
+    all_labels = [int(ex[-1]) for ex in total_dataset]
+    print(
+        "\nClass weights: ",
+        class_weight.compute_class_weight(
+            class_weight="balanced", classes=np.unique(all_labels), y=all_labels
+        ),
+    )
     loo = LeaveOneOut()
 
     train_dataloaders = []
@@ -60,7 +67,12 @@ def loocv_get_physio(args, device):
             shuffle=True,
             num_workers=4,
             collate_fn=lambda batch: variable_time_collate_fn2(
-                batch, args, device, data_type="train", data_min=data_min, data_max=data_max
+                batch,
+                args,
+                device,
+                data_type="train",
+                data_min=data_min,
+                data_max=data_max,
             ),
         )
         test_dataloader = DataLoader(
@@ -69,7 +81,12 @@ def loocv_get_physio(args, device):
             shuffle=False,
             num_workers=4,
             collate_fn=lambda batch: variable_time_collate_fn2(
-                batch, args, device, data_type="test", data_min=data_min, data_max=data_max
+                batch,
+                args,
+                device,
+                data_type="test",
+                data_min=data_min,
+                data_max=data_max,
             ),
         )
 
@@ -78,9 +95,10 @@ def loocv_get_physio(args, device):
 
     return train_dataloaders, test_dataloaders
 
+
 def get_physio(args, device):
     train_dataset_obj = PhysioNet(
-        "/home/lakatos/feris/CfC/data/physionet", #full path needed for ray tune
+        "/home/lakatos/feris/CfC/data/physionet",  # full path needed for ray tune
         train=True,
         quantization=0.016,
         download=True,
@@ -91,10 +109,14 @@ def get_physio(args, device):
     total_dataset = train_dataset_obj[: len(train_dataset_obj)]
     # print("total_dataset len: ", len(total_dataset))
     # Shuffle and split
-    #print(total_dataset)
-    all_labels = [ex[-1] for ex in total_dataset]  
+    # print(total_dataset)
+    all_labels = [ex[-1] for ex in total_dataset]
     train_data, test_data = train_test_split(
-        total_dataset, train_size=0.8, random_state=42,stratify=all_labels, shuffle=True
+        total_dataset,
+        train_size=0.8,
+        random_state=42,
+        stratify=all_labels,
+        shuffle=True,
     )
     # print("train_data len: ", len(train_data))
     # print("test_data len: ", len(test_data))
@@ -103,9 +125,9 @@ def get_physio(args, device):
 
     n_samples = len(total_dataset)
     input_dim = vals.size(-1)
-    #print(input_dim)
+    # print(input_dim)
     batch_size = min(min(len(train_dataset_obj), args.batch_size), 8000)
-    #print(batch_size)
+    # print(batch_size)
     data_min, data_max = get_data_min_max(total_dataset, device)
     # print("data_min,", data_min)
     # print("data_max, ", data_max)
@@ -147,7 +169,6 @@ def get_physio(args, device):
 
 # get minimum and maximum for each feature across the whole dataset
 def get_data_min_max(records, device):
-
     data_min, data_max = None, None
     inf = torch.Tensor([float("Inf")])[0].to(device)
 
@@ -180,7 +201,6 @@ def get_data_min_max(records, device):
 
 
 class PhysioNet(object):
-
     urls = [
         "https://physionet.org/files/challenge-2012/1.0.0/set-a.tar.gz?download",
         "https://physionet.org/files/challenge-2012/1.0.0/set-b.tar.gz?download",
@@ -206,12 +226,12 @@ class PhysioNet(object):
         "ASV_15",
         "ASV_16",
         "ASV_17",
-        #"DR"
+        # "DR"
     ]
 
     params_dict = {k: i for i, k in enumerate(params)}
 
-    labels = ["Test","In-hospital_death"]
+    labels = ["Test", "In-hospital_death"]
     labels_dict = {k: i for i, k in enumerate(labels)}
 
     def __init__(
@@ -223,7 +243,6 @@ class PhysioNet(object):
         n_samples=None,
         device=torch.device("cpu"),
     ):
-
         self.root = root
         self.train = train
         self.reduce = "average"
@@ -271,7 +290,7 @@ class PhysioNet(object):
         # Download outcome data
         for url in self.outcome_urls:
             filename = url.rpartition("/")[2]
-            #download_url(url, self.raw_folder, filename, None)
+            # download_url(url, self.raw_folder, filename, None)
             txtfile = os.path.join(self.raw_folder, filename)
             with open(txtfile) as f:
                 lines = f.readlines()
@@ -288,7 +307,7 @@ class PhysioNet(object):
 
         for url in self.urls:
             filename = url.rpartition("/")[2]
-            #download_url(url, self.raw_folder, filename, None)
+            # download_url(url, self.raw_folder, filename, None)
             # tar = tarfile.open(os.path.join(self.raw_folder, filename), "r:gz")
             # tar.extractall(self.raw_folder)
             # tar.close()
@@ -344,7 +363,7 @@ class PhysioNet(object):
                 tt = torch.tensor(tt).to(device)
                 vals = torch.stack(vals)
                 mask = torch.stack(mask)
-                
+
                 labels = None
                 if record_id in outcomes:
                     # Only training set has labels
