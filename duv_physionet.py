@@ -25,11 +25,12 @@ from torchvision.datasets.utils import download_url
 
 # Adapted from: https://github.com/rtqichen/time-series-datasets
 
+current_directory = os.getcwd()
 
 def loocv_get_physio(args, device):
     # Load your dataset here
     train_dataset_obj = PhysioNet(
-        "CfC/data/physionet",
+        current_directory + "/CfC/data/physionet",
         train=True,
         quantization=0.016,
         download=True,
@@ -98,7 +99,7 @@ def loocv_get_physio(args, device):
 
 def get_physio(args, device):
     train_dataset_obj = PhysioNet(
-        "/home/lakatos/feris/CfC/data/physionet",  # full path needed for ray tune
+        current_directory + "/CfC/data/physionet",  # full path needed for ray tune
         train=True,
         quantization=0.016,
         download=True,
@@ -608,7 +609,7 @@ def variable_time_collate_fn(
 if __name__ == "__main__":
     torch.manual_seed(1991)
 
-    dataset = PhysioNet("data/physionet", train=False, download=True)
+    dataset = PhysioNet(current_directory + "/CfC/data/physionet", train=False, download=True)
     dataloader = DataLoader(
         dataset, batch_size=10, shuffle=True, collate_fn=variable_time_collate_fn
     )
